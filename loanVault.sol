@@ -41,6 +41,21 @@ contract LoanVault is Ownable {
     error LowAccountTokenBalance();
     error LowVaultETHBalance();
     error LowVaultTokenBalance();
+    error ZeroAmountDeposit();
+    error IneligibleNFT();
+    error LoanDurationTooLong();
+    error AmountOutOfAllowedRange();
+    error InauthorizedReturner();
+    error LoanAlreadyExpired();
+    error LoanNotActive();
+    error LoanNotYetDefaulted();
+
+
+    event DepositMadetoVault(address indexed depositer);
+    event AmountWithdrawnFromVault(address indexed withdrawer);
+    event LoanAwarded(address indexed borrower, uint256 principalAmount, uint256 loanId, uint256 collateralTokenId, address collateralNftContract);
+    event LoanReturned(address indexed borrower, uint256 returnedAmount, uint256 loanId);
+    event CollateralClaimed(address indexed claimer, uint256 loanAmount, uint256 loanId, uint256 loanedTokenId, address loanedNftContract );
 
     constructor (address initialOwner, address ERC20Token) Ownable(initialOwner) {
         ERC20 = IERC20(ERC20Token);// the token we loan
@@ -101,10 +116,13 @@ contract LoanVault is Ownable {
         sufficientAccountBalanceERC20(amount)
         returns (bool success) 
     {
-        require(amount > 0, "Zero amount");
+        if (amount < 0) {
+            revert ZeroAmountDeposit();
+        }
         success = ERC20.transferFrom(msg.sender, address(this), amount);
         vaultERC20Balance += amount;
         //emit an event that an amount was dposited?
+        emit DepositMadetoVault(msg.sender);
 
         return success;
     }
@@ -128,8 +146,9 @@ contract LoanVault is Ownable {
     {
         
         vaultERC20Balance -= amount;
-        success = IERC20(0xb27A31f1b0AF2946B7F582768f03239b1eC07c2c).transferFrom(address(this), owner(), amount);
+        success = ERC20.transferFrom(address(this), owner(), amount);
         //emit event that amount was withdrawn
+        emit AmountWithdrawnFromVault(msg.sender);
         return success;
     }
 
@@ -165,17 +184,21 @@ contract LoanVault is Ownable {
         returns (uint256)
     {
 
-        // require(requestedToken == 0 || requestedToken == 1, "Please choose correct id for loaned token");
         uint256 value = whitelistedNFTs[nftContract][tokenId];
-        require(value > 0, "NFT not eligible");
+        if (value <= 0) {
+            revert IneligibleNFT();
+        }
 
-        require(duration <= 120, "Duration too long");
+        if (duration > 120) {
+            revert LoanDurationTooLong();
+        }
 
-        // require(value < vaultEthBalance, "Principal not approved");
 
         uint256 minLoan = value / 20;
         uint256 maxLoan = value /2;
-        require(minLoan <= principal && maxLoan >= principal, "Principal not approved");
+        if (minLoan > principal || maxLoan < principal) {
+            revert AmountOutOfAllowedRange();
+        }
 
 
         IERC721(nftContract).transferFrom(msg.sender, address(this), tokenId);
@@ -198,6 +221,7 @@ contract LoanVault is Ownable {
         vaultERC20Balance -= principal;
         ERC20.transfer(msg.sender, principal);
 
+        emit LoanAwarded(msg.sender, principal, loanId, tokenId, nftContract);
 
         return loanId;
 
@@ -208,9 +232,17 @@ contract LoanVault is Ownable {
     function repayLoan(uint256 loanId) public
     {
         Loan storage loan = loans[loanId];
-        require(loan.borrower == msg.sender, "Not authorized to return loan");
-        require(block.timestamp <= loan.dueTime, "Loan has already expired");
-        require(loan.status ==Status.active, "Loan not active");
+        if (loan.borrower != msg.sender) {
+            revert InauthorizedReturner();
+        }
+
+        if (block.timestamp > loan.dueTime) {
+            revert LoanAlreadyExpired();
+        }
+
+        if (loan.status != Status.active) {
+            revert LoanNotActive();
+        }
 
         uint256 secs = block.timestamp - loan.startTime;
         uint256 interest = calculateInterest(loan.loanedAmount, secs);
@@ -223,19 +255,24 @@ contract LoanVault is Ownable {
         IERC721(loan.nftContract).transferFrom(address(this), msg.sender, loan.tokenId);
 
         //emit event that loan repaid?
+        emit LoanReturned(msg.sender, amountDue, loanId);
     }
 
     function claimCollateral(uint256 loanId) external onlyOwner
     {
         Loan storage loan = loans[loanId];
+        if (loan.status != Status.active) {
+            revert LoanNotActive();
+        }
 
-        require(loan.status == Status.active, "Loan not active");
-        require(block.timestamp > loan.dueTime, "Loan not defaulted yet");
-
+        if (block.timestamp <= loan.dueTime) {
+            revert LoanNotYetDefaulted();
+        }
         loan.status = Status.defaulted;
         IERC721(loan.nftContract).transferFrom(address(this), owner(), loan.tokenId);
 
         //emit event that loan defaulted
+        emit CollateralClaimed(msg.sender, loan.loanedAmount, loanId, loan.tokenId, loan.nftContract );
     }
         
 
